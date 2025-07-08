@@ -1,102 +1,84 @@
 import pandas as pd
-import numpy as np
-import os
 import gradio as gr
 import tempfile
+import os
 
-def get_sheet_names(file_obj):
+def extract_team_and_metrics(file_obj, region="London"):
     if file_obj is None:
-        return [], None
-    try:
-        xls = pd.ExcelFile(file_obj.name)
-        return xls.sheet_names, file_obj
-    except Exception:
-        return [], None
-
-def extract_metrics(file_obj, sheet_name, metric_ids, quarter):
-    if file_obj is None or sheet_name is None:
-        return "❌ Please upload a file and select a sheet", None
+        return "❌ No file uploaded.", None, None
 
     try:
         xls = pd.ExcelFile(file_obj.name)
-        df = xls.parse(sheet_name, header=None)
-        metadata = df.iloc[0:4, 4:].T
-        metadata.columns = ['Team Type', 'Region', 'Trust', 'Team']
-        metadata = metadata.dropna(subset=['Team']).reset_index(drop=True)
+        sheet_names = xls.sheet_names
     except Exception as e:
-        return f"❌ Failed to load or parse sheet: {e}", None
+        return f"❌ Failed to read Excel file: {e}", None, None
 
-    metric_list = [m.strip() for m in metric_ids.split(",")]
-    all_records = []
+    combined_records = []
 
-    for metric_id in metric_list:
+    for sheet in sheet_names:
         try:
-            metric_row = df[df.iloc[:, 1] == metric_id]
-            if metric_row.empty:
-                continue
-            metric_label = metric_row.iloc[0, 0]
-            metric_values = metric_row.iloc[0, 4:4 + len(metadata)]
+            df = xls.parse(sheet, header=None)
 
-            for i in range(len(metadata)):
-                value = metric_values.iloc[i]
-                team = metadata.iloc[i]
-                clean_value = (
-                    np.nan if str(value).strip() in ["", " ", ".", "N/A", "Too few to report", "nan"] else value
-                )
-                all_records.append({
-                    "Quarter": quarter,
-                    "Domain": sheet_name,
-                    "Team Type": team["Team Type"],
-                    "Region": team["Region"],
-                    "Trust": team["Trust"],
-                    "Team": team["Team"],
-                    "Metric ID": metric_id,
-                    "Metric Label": metric_label,
-                    "Value": clean_value
-                })
+            # Get metadata rows
+            trust_row = df.iloc[2, 1:]  # Trusts
+            team_row = df.iloc[3, 1:]   # Team names
+
+            # Build team lookup
+            team_info = []
+            for col in range(len(trust_row)):
+                trust = trust_row.iloc[col]
+                team = team_row.iloc[col]
+                if pd.notna(trust) and pd.notna(team):
+                    team_info.append({
+                        "col": col + 1,  # +1 because first col is metric names
+                        "Team Type": "ESD team",
+                        "Region": region,
+                        "Trust": str(trust).strip(),
+                        "ESD Team": str(team).strip()
+                    })
+
+            # Loop through all metric rows where column D contains '%' or 'median'
+            for i in range(len(df)):
+                data_type = str(df.iloc[i, 3]).lower()
+                if "%" in data_type or "median" in data_type:
+                    metric_label = df.iloc[i, 0]
+                    metric_id = df.iloc[i, 1]
+                    for team in team_info:
+                        value = df.iloc[i, team["col"]]
+                        if pd.notna(value) and str(value).strip() not in ["Too few to report", ".", "N/A"]:
+                            combined_records.append({
+                                **team,
+                                "Metric ID": metric_id,
+                                "Metric Label": metric_label,
+                                "Data Type": df.iloc[i, 3],
+                                "Value": value
+                            })
+
         except Exception:
             continue
 
-    if not all_records:
-        return f"❌ No matching metrics found in sheet '{sheet_name}' for: {metric_ids}", None
+    if not combined_records:
+        return "❌ No matching metrics found with '%' or 'median' types", None, None
 
-    try:
-        df_cleaned = pd.DataFrame(all_records)
-        filename = f"{sheet_name.replace(' ', '_')}_Metrics_{quarter}.csv"
-        output_path = os.path.join(tempfile.gettempdir(), filename)
-        df_cleaned.to_csv(output_path, index=False)
-        return f"✅ Exported cleaned data to: {filename}", output_path
-    except Exception as e:
-        return f"❌ Failed to export cleaned CSV: {e}", None
+    df_combined = pd.DataFrame(combined_records)
+    output_path = os.path.join(tempfile.gettempdir(), "SSNAP_ESD_Median_Percentage_Metrics.xlsx")
+    df_combined.to_excel(output_path, index=False)
+    return "✅ Extracted ESD teams with matching metrics", df_combined, output_path
 
-# Gradio App
+# --- Gradio Interface ---
 with gr.Blocks() as demo:
-    gr.Markdown("### 🧠 SSNAP Community Metric Extractor")
+    gr.Markdown("### 🧠 SSNAP ESD Extractor: Teams + % and Median Metrics")
 
-    file_input = gr.File(label="Upload Excel File (.xlsx)", file_types=[".xlsx"])
-    sheet_state = gr.State()
-    sheet_dropdown = gr.Dropdown(label="Select Sheet", choices=[], visible=True)
-    metric_input = gr.Textbox(label="Enter Metric ID(s) (e.g., L27.3 or L27.3, L32.3)")
-    quarter_input = gr.Textbox(label="Enter Quarter (e.g., 2025-Q1)")
-
+    file_input = gr.File(label="Upload SSNAP Excel File (.xlsx)", file_types=[".xlsx"])
+    region_input = gr.Textbox(label="Enter Region (default: London)", value="London")
     status_output = gr.Textbox(label="Status")
-    download_output = gr.File(label="Download Cleaned CSV")
-    submit_button = gr.Button("Extract and Export")
-
-    def update_dropdown(file_obj):
-        sheets, file_ref = get_sheet_names(file_obj)
-        return gr.Dropdown(choices=sheets, value=sheets[0] if sheets else None), file_ref
+    table_output = gr.Dataframe(label="Extracted Metrics")
+    download_output = gr.File(label="Download Excel")
 
     file_input.change(
-        fn=update_dropdown,
-        inputs=file_input,
-        outputs=[sheet_dropdown, sheet_state]
-    )
-
-    submit_button.click(
-        fn=extract_metrics,
-        inputs=[sheet_state, sheet_dropdown, metric_input, quarter_input],
-        outputs=[status_output, download_output]
+        fn=extract_team_and_metrics,
+        inputs=[file_input, region_input],
+        outputs=[status_output, table_output, download_output]
     )
 
 if __name__ == "__main__":
