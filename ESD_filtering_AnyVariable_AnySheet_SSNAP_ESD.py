@@ -1,84 +1,84 @@
 import pandas as pd
 import gradio as gr
-import tempfile
 import os
+import tempfile
 
-def extract_team_and_metrics(file_obj, region="London"):
+def extract_esd_metrics(file_obj):
     if file_obj is None:
-        return "❌ No file uploaded.", None, None
+        return "❌ No file uploaded", None, None
 
     try:
         xls = pd.ExcelFile(file_obj.name)
-        sheet_names = xls.sheet_names
+        target_sheets = [s for s in xls.sheet_names if s.startswith("L")]
     except Exception as e:
-        return f"❌ Failed to read Excel file: {e}", None, None
+        return f"❌ Failed to read Excel: {e}", None, None
 
     combined_records = []
 
-    for sheet in sheet_names:
+    for sheet in target_sheets:
         try:
             df = xls.parse(sheet, header=None)
 
-            # Get metadata rows
-            trust_row = df.iloc[2, 1:]  # Trusts
-            team_row = df.iloc[3, 1:]   # Team names
+            # Extract team metadata from rows 0–3, columns F+ (index 5+)
+            team_data = []
+            for col in range(5, df.shape[1]):
+                team_type = df.iloc[0, col]
+                region = df.iloc[1, col]
+                trust = df.iloc[2, col]
+                esd_team = df.iloc[3, col]
 
-            # Build team lookup
-            team_info = []
-            for col in range(len(trust_row)):
-                trust = trust_row.iloc[col]
-                team = team_row.iloc[col]
-                if pd.notna(trust) and pd.notna(team):
-                    team_info.append({
-                        "col": col + 1,  # +1 because first col is metric names
-                        "Team Type": "ESD team",
-                        "Region": region,
-                        "Trust": str(trust).strip(),
-                        "ESD Team": str(team).strip()
+                if pd.notna(esd_team):
+                    team_data.append({
+                        "col": col,
+                        "Team Type": str(team_type).strip() if pd.notna(team_type) else None,
+                        "Region": str(region).strip() if pd.notna(region) else None,
+                        "Trust": str(trust).strip() if pd.notna(trust) else None,
+                        "ESD Team": str(esd_team).strip(),
                     })
 
-            # Loop through all metric rows where column D contains '%' or 'median'
-            for i in range(len(df)):
+            # Loop through data rows where Data Type = % or median
+            for i in range(4, df.shape[0]):
                 data_type = str(df.iloc[i, 3]).lower()
                 if "%" in data_type or "median" in data_type:
                     metric_label = df.iloc[i, 0]
                     metric_id = df.iloc[i, 1]
-                    for team in team_info:
+
+                    for team in team_data:
                         value = df.iloc[i, team["col"]]
-                        if pd.notna(value) and str(value).strip() not in ["Too few to report", ".", "N/A"]:
+                        if pd.notna(value) and str(value).strip() not in ["Too few to report", "Reported annually",".", "N/A", ""]:
                             combined_records.append({
                                 **team,
+                                "Sheet": sheet,
                                 "Metric ID": metric_id,
                                 "Metric Label": metric_label,
                                 "Data Type": df.iloc[i, 3],
                                 "Value": value
                             })
-
         except Exception:
             continue
 
     if not combined_records:
-        return "❌ No matching metrics found with '%' or 'median' types", None, None
+        return "❌ No % or median metrics found.", None, None
 
     df_combined = pd.DataFrame(combined_records)
-    output_path = os.path.join(tempfile.gettempdir(), "SSNAP_ESD_Median_Percentage_Metrics.xlsx")
-    df_combined.to_excel(output_path, index=False)
-    return "✅ Extracted ESD teams with matching metrics", df_combined, output_path
+    out_path = os.path.join(tempfile.gettempdir(), "SSNAP_ESD_Metrics_Output.xlsx")
+    df_combined.to_excel(out_path, index=False)
 
-# --- Gradio Interface ---
+    return "✅ ESD metrics with % or median extracted.", df_combined, out_path
+
+# Gradio app interface
 with gr.Blocks() as demo:
-    gr.Markdown("### 🧠 SSNAP ESD Extractor: Teams + % and Median Metrics")
+    gr.Markdown("### 🧠 SSNAP ESD Extractor – % and Median Metrics")
 
     file_input = gr.File(label="Upload SSNAP Excel File (.xlsx)", file_types=[".xlsx"])
-    region_input = gr.Textbox(label="Enter Region (default: London)", value="London")
     status_output = gr.Textbox(label="Status")
-    table_output = gr.Dataframe(label="Extracted Metrics")
-    download_output = gr.File(label="Download Excel")
+    table_output = gr.Dataframe(label="Extracted Metric Records")
+    download_button = gr.File(label="Download Excel Output")
 
     file_input.change(
-        fn=extract_team_and_metrics,
-        inputs=[file_input, region_input],
-        outputs=[status_output, table_output, download_output]
+        fn=extract_esd_metrics,
+        inputs=[file_input],
+        outputs=[status_output, table_output, download_button]
     )
 
 if __name__ == "__main__":
