@@ -2,9 +2,10 @@ import pandas as pd
 import gradio as gr
 import os
 import tempfile
+import re
 from openpyxl import load_workbook
 
-def extract_esd_metrics_with_full_labels(file_obj):
+def extract_esd_metrics_with_full_labels(file_obj, include_all_rows):
     if file_obj is None:
         return "❌ No file uploaded", None, None
 
@@ -39,23 +40,23 @@ def extract_esd_metrics_with_full_labels(file_obj):
                         "ESD Team": str(esd_team).strip()
                     })
 
-            # ✅ Build metric label mapping with forward-fill logic
+            # ✅ Build metric label mapping using column C (Excel)
             metric_labels = {}
             last_label = None
             for row in range(5, ws.max_row + 1):
-                val = ws.cell(row=row, column=1).value
+                val = ws.cell(row=row, column=3).value  # ✅ Column C = column=3
                 if val and str(val).strip().lower() != "nan":
-                    last_label = str(val).replace("\n", " ").strip()
+                    last_label = re.sub(r'\s+', ' ', str(val)).strip()
                 metric_labels[row] = last_label
 
-            # Loop through each row for % or median metrics
+            # Loop through each row
             for i in range(4, df.shape[0]):
                 raw_type = df.iloc[i, 3]
                 data_type = str(raw_type).strip().lower() if pd.notna(raw_type) else ""
 
-                if "%" in data_type or "median" in data_type:
+                if include_all_rows or "%" in data_type or "median" in data_type:
                     metric_id = df.iloc[i, 1]
-                    row_excel = i + 2  # Excel row alignment
+                    row_excel = i + 2  # Align with Excel row numbers
                     metric_label = metric_labels.get(row_excel, "")
 
                     for team in team_data:
@@ -75,26 +76,37 @@ def extract_esd_metrics_with_full_labels(file_obj):
             continue
 
     if not combined_records:
-        return "❌ No metrics with '%' or 'median' found.", None, None
+        return "❌ No matching metrics found.", None, None
 
     df_final = pd.DataFrame(combined_records)
     out_path = os.path.join(tempfile.gettempdir(), "SSNAP_ESD_Metrics_Complete.xlsx")
     df_final.to_excel(out_path, index=False)
 
-    return f"✅ Extracted {len(df_final)} metric rows with full labels.", df_final, out_path
+    return f"✅ Extracted {len(df_final)} metric rows.", df_final, out_path
 
 # ---------- Gradio UI ----------
 with gr.Blocks() as demo:
-    gr.Markdown("### 📊 SSNAP ESD Metric Extractor\nUpload a SSNAP Excel file to extract metrics containing **%** or **median** with **full metric labels** from `L*` sheets.")
+    gr.Markdown("### 📊 SSNAP ESD Metric Extractor\nUpload a SSNAP Excel file to extract ESD metrics with full labels from `L*` sheets.")
 
-    file_input = gr.File(label="📁 Upload SSNAP Excel File (.xlsx)", file_types=[".xlsx"])
+    with gr.Row():
+        file_input = gr.File(label="📁 Upload SSNAP Excel File (.xlsx)", file_types=[".xlsx"])
+        include_all = gr.Checkbox(label="Include all rows (not just % or median)", value=False)
+
     status = gr.Textbox(label="Status", interactive=False)
     table = gr.Dataframe(label="📋 Extracted Metrics Table")
     download = gr.File(label="⬇️ Download Extracted Excel File")
 
+    def on_change(file, include_all):
+        return extract_esd_metrics_with_full_labels(file, include_all)
+
     file_input.change(
-        fn=extract_esd_metrics_with_full_labels,
-        inputs=[file_input],
+        fn=on_change,
+        inputs=[file_input, include_all],
+        outputs=[status, table, download]
+    )
+    include_all.change(
+        fn=on_change,
+        inputs=[file_input, include_all],
         outputs=[status, table, download]
     )
 
